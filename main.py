@@ -18,6 +18,20 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="uvicorn.p
 # Create FastMCP server instance
 mcp = FastMCP("MLB API MCP Server")
 
+
+async def get_tools_dict():
+    """Return the server's registered tools as a {name: tool} dict.
+
+    FastMCP renamed ``FastMCP.get_tools()`` (v2) to ``FastMCP.list_tools()`` (v3)
+    and changed its return type from a ``dict[str, Tool]`` to a ``list[Tool]``.
+    This helper works with both: it calls whichever method exists and normalizes
+    to the dict shape that the custom routes below already iterate over.
+    """
+    if hasattr(mcp, "list_tools"):
+        tools = await mcp.list_tools()  # FastMCP 3.x -> Sequence[Tool]
+        return {tool.name: tool for tool in tools}
+    return await mcp.get_tools()  # type: ignore[attr-defined]  # FastMCP 2.x -> dict[str, Tool]
+
 # Setup all MLB and generic tools
 setup_mlb_tools(mcp)
 setup_generic_tools(mcp)
@@ -38,7 +52,7 @@ async def health_check(request):
 @mcp.custom_route("/info", methods=["GET"])
 async def mcp_info(request):
     """Information about the MCP server"""
-    tools_list = await mcp.get_tools()
+    tools_list = await get_tools_dict()
     return JSONResponse(
         {
             "status": "running",
@@ -56,7 +70,7 @@ async def mcp_info(request):
 async def list_tools(request):
     """List available MCP tools"""
     tools = []
-    tools_list = await mcp.get_tools()
+    tools_list = await get_tools_dict()
     for tool_name, tool in tools_list.items():
         tools.append(
             {
@@ -72,7 +86,7 @@ async def list_tools(request):
 @mcp.custom_route("/docs", methods=["GET"])
 async def docs(request):
     """Basic documentation endpoint"""
-    tools_list = await mcp.get_tools()
+    tools_list = await get_tools_dict()
     docs_html = f"""
     <!DOCTYPE html>
     <html>
@@ -161,7 +175,7 @@ if __name__ == "__main__":
 
         # Create CORS middleware configuration
         from starlette.middleware import Middleware
-        
+
         cors_middleware = Middleware(
             CORSMiddleware,
             allow_origins=["*"],  # Configure this more restrictively in production
@@ -172,58 +186,11 @@ if __name__ == "__main__":
             max_age=86400,
         )
 
-        # Get the Starlette app with CORS middleware (using modern http_app method)
-        # Note: FastMCP uses Mount internally, which enforces trailing slashes per Starlette design
+        # Get the Starlette app with CORS middleware (using modern http_app method).
+        # FastMCP 2.x mounts the streamable-HTTP transport at /mcp/ and serves it
+        # directly. Do NOT add a path-rewrite middleware here: rewriting /mcp -> /mcp/
+        # fights FastMCP's own redirect and produces an infinite 307 loop.
         app = mcp.http_app(middleware=[cors_middleware])
-        
-        # Workaround for Starlette Mount trailing slash behavior (issue #869)
-        # https://github.com/encode/starlette/issues/869
-        # Create middleware that modifies the path scope to add trailing slash
-        class MCPPathRedirect:
-            def __init__(self, app):
-                self.app = app
-
-            async def __call__(self, scope, receive, send):
-                if scope.get('type') == 'http' and scope.get('path') == '/mcp':
-                    scope['path'] = '/mcp/'
-                    scope['raw_path'] = b'/mcp/'
-                await self.app(scope, receive, send)
-        
-        # Apply the middleware
-        app = MCPPathRedirect(app)
-
-        # Create CORS middleware configuration
-        from starlette.middleware import Middleware
-        
-        cors_middleware = Middleware(
-            CORSMiddleware,
-            allow_origins=["*"],  # Configure this more restrictively in production
-            allow_credentials=True,
-            allow_methods=["GET", "POST", "OPTIONS"],
-            allow_headers=["*"],
-            expose_headers=["mcp-session-id"],  # Allow client to read session ID
-            max_age=86400,
-        )
-
-        # Get the Starlette app with CORS middleware (using modern http_app method)
-        # Note: FastMCP uses Mount internally, which enforces trailing slashes per Starlette design
-        app = mcp.http_app(middleware=[cors_middleware])
-        
-        # Workaround for Starlette Mount trailing slash behavior (issue #869)
-        # https://github.com/encode/starlette/issues/869
-        # Create middleware that modifies the path scope to add trailing slash
-        class MCPPathRedirect:
-            def __init__(self, app):
-                self.app = app
-
-            async def __call__(self, scope, receive, send):
-                if scope.get('type') == 'http' and scope.get('path') == '/mcp':
-                    scope['path'] = '/mcp/'
-                    scope['raw_path'] = b'/mcp/'
-                await self.app(scope, receive, send)
-        
-        # Apply the middleware
-        app = MCPPathRedirect(app)
 
         # Run the MCP server with HTTP transport using uvicorn
         uvicorn.run(
