@@ -149,6 +149,79 @@ def get_sabermetrics_for_players(
     return result
 
 
+def filter_fields_by_name(obj, field_names: set):
+    """
+    Recursively prune a dict/list structure, keeping only keys listed in field_names
+    (plus whatever ancestors are needed to reach a match). If a matched key's subtree
+    contains no deeper matches, the subtree is returned unfiltered rather than emptied,
+    since the caller didn't ask for anything more specific below it.
+    """
+    if isinstance(obj, dict):
+        result = {}
+        for key, value in obj.items():
+            if key in field_names:
+                if isinstance(value, (dict, list)):
+                    nested = filter_fields_by_name(value, field_names)
+                    result[key] = nested if nested else value
+                else:
+                    result[key] = value
+            elif isinstance(value, (dict, list)):
+                nested = filter_fields_by_name(value, field_names)
+                if nested:
+                    result[key] = nested
+        return result
+    if isinstance(obj, list):
+        items = [filter_fields_by_name(item, field_names) for item in obj]
+        return [item for item in items if item not in (None, {}, [])]
+    return obj
+
+
+# statTypes accepted by the MLB Stats API for player stat lookups (see
+# https://statsapi.mlb.com/api/v1/statTypes).
+VALID_STAT_TYPES = {
+    "byDateRange",
+    "byDateRangeAdvanced",
+    "byDayOfWeek",
+    "byDayOfWeekPlayoffs",
+    "byMonth",
+    "byMonthPlayoffs",
+    "career",
+    "careerAdvanced",
+    "careerPlayoffs",
+    "careerRegularSeason",
+    "expectedStatistics",
+    "gameLog",
+    "homeAndAway",
+    "homeAndAwayPlayoffs",
+    "hotColdZones",
+    "lastXGames",
+    "opponentsFaced",
+    "outsAboveAverage",
+    "pitchArsenal",
+    "pitchLog",
+    "playLog",
+    "projectedRos",
+    "rankingsByYear",
+    "sabermetrics",
+    "season",
+    "seasonAdvanced",
+    "sprayChart",
+    "statsSingleSeason",
+    "statsSingleSeasonAdvanced",
+    "vsPlayer",
+    "vsPlayer5Y",
+    "vsPlayerTotal",
+    "vsTeam",
+    "vsTeam5Y",
+    "vsTeamTotal",
+    "winLoss",
+    "winLossPlayoffs",
+    "yearByYear",
+    "yearByYearAdvanced",
+    "yearByYearPlayoffs",
+}
+
+
 def get_team_id_from_name(team: str) -> Optional[int]:
     """Helper to get team ID from team name, partial name, or stringified ID."""
     # Accept stringified integer as ID
@@ -375,7 +448,8 @@ def setup_mlb_tools(mcp):
         Args:
             game_id (int): The game ID.
             timecode (Optional[str]): Specific timecode for the boxscore snapshot.
-            fields (Optional[str]): Comma-separated list of fields to include.
+            fields (Optional[str]): Comma-separated list of field names to include in the response. Filtering is
+              applied locally after fetching the full boxscore, so it never breaks response validation.
 
         Returns:
             dict: Boxscore information.
@@ -384,9 +458,17 @@ def setup_mlb_tools(mcp):
             params = {}
             if timecode is not None:
                 params["timecode"] = timecode
-            if fields is not None:
-                params["fields"] = fields
+            # Note: `fields` is intentionally NOT passed to the underlying API call. The MLB Stats API applies
+            # `fields` server-side, which can strip fields that the response model requires, causing validation
+            # to fail. Instead we always fetch the full boxscore (so validation always succeeds) and filter it
+            # ourselves afterward.
             boxscore = mlb.get_game_box_score(game_id, **params)
+            if boxscore is None:
+                return {"error": f"No boxscore found for game_id {game_id}"}
+            if fields is not None:
+                boxscore_dict = boxscore.model_dump(by_alias=True) if hasattr(boxscore, "model_dump") else boxscore
+                field_names = {f.strip() for f in fields.split(",") if f.strip()}
+                return filter_fields_by_name(boxscore_dict, field_names)
             return boxscore
         except Exception as e:
             return {"error": str(e)}
@@ -405,7 +487,9 @@ def setup_mlb_tools(mcp):
         Args:
             player_ids (str): Comma-separated list of player IDs.
             group (Optional[str]): Stat group (e.g., hitting, pitching).
-            type (Optional[str]): Stat type (e.g., season, career).
+            type (Optional[str]): Stat type. Defaults to "career" if not specified. See
+              https://statsapi.mlb.com/api/v1/statTypes for the full list of accepted values
+              (e.g. "season", "career", "gameLog", "yearByYear").
             season (Optional[int]): Season year.
             eventType (Optional[str]): Event type filter.
 
@@ -415,8 +499,19 @@ def setup_mlb_tools(mcp):
         try:
             player_ids_list = [pid.strip() for pid in player_ids.split(",")]
 
-            # Use the helper function from the original code
-            stats = ["season", "seasonAdvanced"] if type == "season" else ["career"]
+            if type is None:
+                stats = ["career"]
+            elif type == "season":
+                stats = ["season", "seasonAdvanced"]
+            elif type in VALID_STAT_TYPES:
+                stats = [type]
+            else:
+                return {
+                    "error": (
+                        f"Invalid type '{type}'. See https://statsapi.mlb.com/api/v1/statTypes for valid values, "
+                        f"e.g.: {', '.join(sorted(VALID_STAT_TYPES))}."
+                    )
+                }
             groups = [group] if group else ["hitting"]
 
             splits = get_multiple_player_stats(mlb, player_ids_list, stats, groups, season)
@@ -577,20 +672,27 @@ def setup_mlb_tools(mcp):
             return {"error": str(e)}
 
     @mcp.tool()
-    def get_mlb_search_players(fullname: str, sport_id: int = 1, search_key: str = "fullname") -> dict:
+    def get_mlb_search_players(fullname: str, sport_id: int = 1, search_key: str = "fullName") -> dict:
         """
         Search for players by name.
 
         Args:
             fullname (str): Player name to search for.
             sport_id (int): Sport ID (default: 1 for MLB).
-            search_key (str): Search key (default: "fullname").
+            search_key (str): Which field of each candidate player record to compare `fullname` against.
+              The underlying API only ever fetches "fullName" for each player, so this must be "fullName"
+              (default) - any other value will silently match nothing.
 
         Returns:
             dict: Player search results.
         """
         try:
-            player_ids = mlb.get_people_id(fullname, sport_id=sport_id, search_key=search_key)
+            # The underlying API only ever populates "fullName" (and "id", which can't be used here - the
+            # library's own name-matching logic assumes a string field) on each candidate record. Normalize
+            # common casings (e.g. "fullname") instead of silently matching zero players.
+            if search_key.lower() != "fullname":
+                return {"error": f"Invalid search_key '{search_key}'. Must be 'fullName'."}
+            player_ids = mlb.get_people_id(fullname, sport_id=sport_id, search_key="fullName")
             return {"player_ids": player_ids}
         except Exception as e:
             return {"error": str(e)}
@@ -742,21 +844,22 @@ def setup_mlb_tools(mcp):
                     if hasattr(team_data, "players") and team_data.players is not None:
                         players_dict = team_data.players
 
-                        # Extract player information
+                        # Extract player information. Player dict keys are formatted like "ID660271"
+                        # (uppercase "ID" prefix from the raw MLB Stats API response).
                         for player_key, player_data in players_dict.items():
-                            if player_key.startswith("id"):
+                            if player_key.upper().startswith("ID"):
                                 player_info = {
                                     "player_id": getattr(player_data.person, "id", None),
-                                    "player_name": getattr(player_data.person, "fullname", "Unknown"),
-                                    "jersey_number": getattr(player_data, "jerseynumber", None),
+                                    "player_name": getattr(player_data.person, "full_name", "Unknown"),
+                                    "jersey_number": getattr(player_data, "jersey_number", None),
                                     "positions": [],
                                     "batting_order": None,
                                     "game_entries": [],
                                 }
 
                                 # Get position information
-                                if hasattr(player_data, "allpositions") and player_data.allpositions is not None:
-                                    for position in player_data.allpositions:
+                                if hasattr(player_data, "all_positions") and player_data.all_positions is not None:
+                                    for position in player_data.all_positions:
                                         position_info = {
                                             "position": getattr(position, "abbreviation", None),
                                             "position_name": getattr(position, "name", None),
@@ -764,27 +867,31 @@ def setup_mlb_tools(mcp):
                                         player_info["positions"].append(position_info)
 
                                 # Get batting order from player data directly
-                                if hasattr(player_data, "battingorder"):
-                                    player_info["batting_order"] = getattr(player_data, "battingorder", None)
+                                if hasattr(player_data, "batting_order"):
+                                    player_info["batting_order"] = getattr(player_data, "batting_order", None)
 
                                 # Get game entry information (substitutions, etc.)
-                                if hasattr(player_data, "gamestatus"):
-                                    game_status = player_data.gamestatus
+                                if hasattr(player_data, "game_status"):
+                                    game_status = player_data.game_status
                                     entry_info = {
-                                        "is_on_bench": getattr(game_status, "isonbench", False),
-                                        "is_substitute": getattr(game_status, "issubstitute", False),
-                                        "status": getattr(game_status, "status", None),
+                                        "is_on_bench": getattr(game_status, "is_on_bench", False),
+                                        "is_substitute": getattr(game_status, "is_substitute", False),
+                                        "is_current_batter": getattr(game_status, "is_current_batter", False),
+                                        "is_current_pitcher": getattr(game_status, "is_current_pitcher", False),
                                     }
                                     player_info["game_entries"].append(entry_info)
 
                                 team_info["players"].append(player_info)
 
-                    # Sort players by batting order (starting lineup first, then substitutes)
+                    # Sort players by batting order (starting lineup first, then substitutes).
+                    # MLB's battingOrder is a 3-digit string: the first digit is the lineup spot
+                    # (1-9), the remaining digits count substitutions in that spot (e.g. "100" is the
+                    # leadoff starter, "101" is the first sub batting leadoff).
                     def sort_key(player):
                         batting_order = player.get("batting_order")
                         if batting_order is None:
                             return 999  # Put non-batting order players at the end
-                        return int(str(batting_order).replace("0", ""))  # Handle batting order formatting
+                        return int(str(batting_order))
 
                     team_info["players"].sort(key=sort_key)
                     result["teams"][team_type] = team_info

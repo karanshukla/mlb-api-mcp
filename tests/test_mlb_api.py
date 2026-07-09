@@ -89,12 +89,67 @@ def test_get_mlb_boxscore(mcp):
         assert "boxscore" in str(result) or isinstance(result, dict)
 
 
+def test_get_mlb_boxscore_does_not_forward_fields_to_api(mcp):
+    """`fields` must never be sent to the underlying API call: the MLB Stats API applies it
+    server-side, which can strip fields the response model requires and crash validation.
+    """
+    get_mlb_boxscore = get_tool(mcp, "get_mlb_boxscore")
+    with patch("mlb_api.mlb.get_game_box_score", return_value={"teams": {}}) as mock_boxscore:
+        get_mlb_boxscore(game_id=789, fields="teams,players,person,id")
+        mock_boxscore.assert_called_once_with(789)
+
+
+def test_get_mlb_boxscore_filters_fields_locally(mcp):
+    get_mlb_boxscore = get_tool(mcp, "get_mlb_boxscore")
+
+    class FakeBoxScore:
+        def model_dump(self, by_alias=False):
+            return {
+                "teams": {
+                    "home": {
+                        "team": {"id": 137, "name": "Giants"},
+                        "players": {
+                            "ID660271": {
+                                "person": {"id": 660271, "fullName": "Ty France"},
+                                "jerseyNumber": "23",
+                            }
+                        },
+                    }
+                }
+            }
+
+    with patch("mlb_api.mlb.get_game_box_score", return_value=FakeBoxScore()):
+        result = get_mlb_boxscore(game_id=789, fields="teams,players,person,fullName")
+        assert "error" not in result
+        home_players = result["teams"]["home"]["players"]["ID660271"]
+        assert home_players["person"]["fullName"] == "Ty France"
+        # jerseyNumber wasn't requested and should be pruned
+        assert "jerseyNumber" not in home_players
+
+
 def test_get_multiple_mlb_player_stats(mcp):
     get_multiple_mlb_player_stats = get_tool(mcp, "get_multiple_mlb_player_stats")
     assert get_multiple_mlb_player_stats is not None
     with patch("mlb_api.get_multiple_player_stats", return_value=[{"player": 1}]):
         result = get_multiple_mlb_player_stats(player_ids="1,2", group="hitting", type="season", season=2022)
         assert "player_stats" in result
+
+
+def test_get_multiple_mlb_player_stats_gamelog_type(mcp):
+    """type='gameLog' must be honored, not silently replaced with 'career' stats."""
+    get_multiple_mlb_player_stats = get_tool(mcp, "get_multiple_mlb_player_stats")
+    with patch("mlb_api.get_multiple_player_stats", return_value=[{"player": 1}]) as mock_stats:
+        result = get_multiple_mlb_player_stats(player_ids="656302", group="pitching", type="gameLog", season=2026)
+        assert "player_stats" in result
+        args, _kwargs = mock_stats.call_args
+        # args: (mlb, person_ids, stats, groups, season)
+        assert args[2] == ["gameLog"]
+
+
+def test_get_multiple_mlb_player_stats_invalid_type(mcp):
+    get_multiple_mlb_player_stats = get_tool(mcp, "get_multiple_mlb_player_stats")
+    result = get_multiple_mlb_player_stats(player_ids="656302", group="pitching", type="notARealType", season=2026)
+    assert "error" in result
 
 
 def test_get_mlb_sabermetrics(mcp):
@@ -169,9 +224,18 @@ def test_get_mlb_roster(mcp):
 def test_get_mlb_search_players(mcp):
     get_mlb_search_players = get_tool(mcp, "get_mlb_search_players")
     assert get_mlb_search_players is not None
-    with patch("mlb_api.mlb.get_people_id", return_value=[1, 2]):
+    with patch("mlb_api.mlb.get_people_id", return_value=[1, 2]) as mock_get_people_id:
         result = get_mlb_search_players(fullname="John Doe")
         assert "player_ids" in result
+        # search_key must be forwarded as the library's actual (camelCase) dict key, not the
+        # tool's old lowercase default, or every lookup silently matches zero players.
+        mock_get_people_id.assert_called_once_with("John Doe", sport_id=1, search_key="fullName")
+
+
+def test_get_mlb_search_players_invalid_search_key(mcp):
+    get_mlb_search_players = get_tool(mcp, "get_mlb_search_players")
+    result = get_mlb_search_players(fullname="John Doe", search_key="all")
+    assert "error" in result
 
 
 def test_get_mlb_players(mcp):
@@ -229,6 +293,45 @@ def test_get_mlb_game_lineup(mcp):
     with patch("mlb_api.mlb.get_game_box_score", return_value=mock_boxscore):
         result = get_mlb_game_lineup(game_id=1)
         assert "teams" in result
+
+
+def test_get_mlb_game_lineup_extracts_players(mcp):
+    """Player dict keys from the raw API are formatted like 'ID660271' (uppercase 'ID'
+    prefix); the lineup tool must recognize them and read the models' real (snake_case)
+    attribute names to populate names, positions, batting order, and game status.
+    """
+    get_mlb_game_lineup = get_tool(mcp, "get_mlb_game_lineup")
+
+    mock_position = MagicMock(abbreviation="1B")
+    mock_position.name = "First Base"
+    mock_game_status = MagicMock(
+        is_on_bench=False, is_substitute=False, is_current_batter=False, is_current_pitcher=True
+    )
+    mock_person = MagicMock(id=660271, full_name="Ty France")
+    mock_player = MagicMock(
+        person=mock_person,
+        jersey_number="23",
+        all_positions=[mock_position],
+        batting_order=100,
+        game_status=mock_game_status,
+    )
+    mock_team = MagicMock()
+    mock_team.team = MagicMock(name="Giants", id=137)
+    mock_team.players = {"ID660271": mock_player}
+    mock_boxscore = MagicMock()
+    mock_boxscore.teams = MagicMock(home=mock_team, away=mock_team)
+
+    with patch("mlb_api.mlb.get_game_box_score", return_value=mock_boxscore):
+        result = get_mlb_game_lineup(game_id=1)
+        home_players = result["teams"]["home"]["players"]
+        assert len(home_players) == 1
+        player = home_players[0]
+        assert player["player_id"] == 660271
+        assert player["player_name"] == "Ty France"
+        assert player["jersey_number"] == "23"
+        assert player["batting_order"] == 100
+        assert player["positions"] == [{"position": "1B", "position_name": "First Base"}]
+        assert player["game_entries"][0]["is_current_pitcher"] is True
 
 
 def test_get_statcast_pitcher(mcp):
