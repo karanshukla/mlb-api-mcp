@@ -42,7 +42,6 @@ os.chdir(_REPO_ROOT)
 
 import jwt
 from jwt import PyJWKClient
-from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -80,8 +79,7 @@ CF_AUD = os.environ.get("CF_ACCESS_AUD")
 
 if not CF_TEAM_DOMAIN or not CF_AUD:
     log.error(
-        "Missing CF_ACCESS_TEAM_DOMAIN or CF_ACCESS_AUD env vars. "
-        "Requests will not be verifiable, refusing to start."
+        "Missing CF_ACCESS_TEAM_DOMAIN or CF_ACCESS_AUD env vars. Requests will not be verifiable, refusing to start."
     )
     sys.exit(1)
 
@@ -142,12 +140,12 @@ class CloudflareAccessMiddleware:
         response = JSONResponse({"error": message}, status_code=401)
         await response(
             {"type": "http", "headers": []},  # scope is unused by Response.__call__
-            None,
+            None,  # type: ignore[arg-type]  # receive is unused by non-streaming Response
             send,
         )
 
 
-def build_app() -> Starlette:
+def build_app() -> ASGIApp:
     # mlb-api-mcp uses the third-party `fastmcp` package (not the official
     # MCP SDK's mcp.server.fastmcp), which builds its ASGI app via
     # http_app() rather than streamable_http_app().
