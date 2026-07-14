@@ -29,3 +29,6 @@ tests/__pycache__/
 htmlcov/
 coverage.xml
 .coverage.*
+
+# Local agent/editor state
+.zcode/

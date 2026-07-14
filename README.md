@@ -3,7 +3,7 @@
 [![CI Status](https://github.com/guillochon/mlb-api-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/guillochon/mlb-api-mcp/actions/workflows/ci.yml)
 ![License](https://img.shields.io/github/license/guillochon/mlb-api-mcp)
 [![smithery badge](https://smithery.ai/badge/@guillochon/mlb-api-mcp)](https://smithery.ai/server/@guillochon/mlb-api-mcp)
-![Coverage](https://img.shields.io/badge/coverage-86.27%25-brightgreen)
+![Coverage](https://img.shields.io/badge/coverage-89.69%25-brightgreen)
 
 A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that provides comprehensive access to MLB statistics and baseball data through a FastMCP-based interface.
 
