@@ -267,6 +267,24 @@ def test_get_mlb_search_players_invalid_search_key(mcp):
     assert "error" in result
 
 
+def test_get_mlb_search_players_strips_whitespace(mcp):
+    get_mlb_search_players = get_tool(mcp, "get_mlb_search_players")
+    with patch("mlb_api.mlb.get_people_id", return_value=[1]) as mock_get_people_id:
+        result = get_mlb_search_players(fullname="  Aaron Judge  ")
+        assert result["player_ids"] == [1]
+        # Leading/trailing whitespace must be stripped before the exact-match comparison,
+        # or an otherwise-correct name silently matches zero players.
+        mock_get_people_id.assert_called_once_with("Aaron Judge", sport_id=1, search_key="fullName")
+
+
+def test_get_mlb_search_players_no_match_includes_note(mcp):
+    get_mlb_search_players = get_tool(mcp, "get_mlb_search_players")
+    with patch("mlb_api.mlb.get_people_id", return_value=[]):
+        result = get_mlb_search_players(fullname="Judge")
+        assert result["player_ids"] == []
+        assert "note" in result
+
+
 def test_get_mlb_players(mcp):
     get_mlb_players = get_tool(mcp, "get_mlb_players")
     assert get_mlb_players is not None
