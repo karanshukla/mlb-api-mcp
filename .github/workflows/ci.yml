@@ -61,8 +61,14 @@ jobs:
       run: uv run pytest --cov-report=xml
 
     - name: Generate coverage badge
-      # Only run on push events or PRs from the same repository (not external forks)
-      if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      # Only attempt the badge push on branches we can actually push to.
+      # `main` is protected (changes must go through a PR), so a direct push
+      # there is always rejected by repository rules and would fail this job
+      # for what is purely a cosmetic README badge. External-fork PRs can't
+      # push either and are handled by the separate report step below.
+      if: |
+        (github.event_name == 'push' && github.ref_name != 'main')
+        || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
       run: |
         # Extract coverage percentage from XML
         COVERAGE=$(python -c "
@@ -72,31 +78,35 @@ jobs:
         coverage = float(root.attrib['line-rate']) * 100
         print(f'{coverage:.2f}')
         ")
-        
+
         # Create shields.io badge URL
         BADGE_URL="https://img.shields.io/badge/coverage-${COVERAGE}%25-brightgreen"
-        
+
         # Update README.md with new badge URL
         sed -i "s|https://img.shields.io/badge/coverage-[0-9.]*%25-brightgreen|${BADGE_URL}|g" README.md
-        
+
         # Get the current branch name
         if [ "${{ github.event_name }}" = "pull_request" ]; then
           BRANCH_NAME="${{ github.head_ref }}"
         else
           BRANCH_NAME="${{ github.ref_name }}"
         fi
-        
-        # Commit and push if changes were made
+
+        # Commit if the badge actually changed.
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
         git add README.md
-        git diff --staged --quiet || git commit -m "Update coverage badge to ${COVERAGE}%"
-        
-        # Try to push, and if it fails, pull and try again
+        if git diff --staged --quiet; then
+          echo "Badge already up to date; nothing to push."
+          exit 0
+        fi
+        git commit -m "Update coverage badge to ${COVERAGE}%"
+
+        # Best-effort push. This must not fail the test job: the branch may be
+        # protected (race on merge) or already deleted by the time we get here,
+        # neither of which has anything to do with whether the tests passed.
         if ! git push origin HEAD:${BRANCH_NAME}; then
-          echo "Push failed, pulling latest changes and retrying..."
-          git pull origin ${BRANCH_NAME} --rebase || git pull origin ${BRANCH_NAME} --no-rebase
-          git push origin HEAD:${BRANCH_NAME}
+          echo "::warning::Could not push coverage badge to ${BRANCH_NAME} (branch protected, deleted, or behind). Skipping; badge is cosmetic."
         fi
 
     - name: Coverage report (for external PRs)
