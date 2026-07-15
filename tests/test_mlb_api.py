@@ -86,7 +86,9 @@ def test_get_mlb_boxscore(mcp):
     assert get_mlb_boxscore is not None
     with patch("mlb_api.mlb.get_game_box_score", return_value={"boxscore": True}):
         result = get_mlb_boxscore(game_id=789)
-        assert "boxscore" in str(result) or isinstance(result, dict)
+        # Top-level result must be a dict (MCP structured output); payload is wrapped.
+        assert isinstance(result, dict)
+        assert result["boxscore"] == {"boxscore": True}
 
 
 def test_get_mlb_boxscore_does_not_forward_fields_to_api(mcp):
@@ -121,7 +123,10 @@ def test_get_mlb_boxscore_filters_fields_locally(mcp):
     with patch("mlb_api.mlb.get_game_box_score", return_value=FakeBoxScore()):
         result = get_mlb_boxscore(game_id=789, fields="teams,players,person,fullName")
         assert "error" not in result
-        home_players = result["teams"]["home"]["players"]["ID660271"]
+        # The filtered boxscore is now wrapped under the "boxscore" key so the
+        # top-level structured result is always a dict (MCP output schema).
+        boxscore = result["boxscore"]
+        home_players = boxscore["teams"]["home"]["players"]["ID660271"]
         assert home_players["person"]["fullName"] == "Ty France"
         # jerseyNumber wasn't requested and should be pruned
         assert "jerseyNumber" not in home_players
@@ -163,12 +168,15 @@ def test_get_mlb_sabermetrics(mcp):
 def test_get_mlb_game_highlights(mcp):
     get_mlb_game_highlights = get_tool(mcp, "get_mlb_game_highlights")
     assert get_mlb_game_highlights is not None
-    with patch("mlb_api.mlb.get_game") as mock_get_game:
-        mock_game = MagicMock()
-        mock_game.content.highlights = {"highlights": True}
-        mock_get_game.return_value = mock_game
+    # The tool fetches game content directly via the data adapter (bypassing the
+    # Game model, which breaks on upstream field-shape drift) and reads the
+    # highlights list from content["highlights"]["highlights"].
+    mock_response = MagicMock(status_code=200)
+    mock_response.data = {"highlights": {"highlights": [{"headline": "HR"}]}}
+    with patch("mlb_api.mlb._mlb_adapter_v1.get", return_value=mock_response):
         result = get_mlb_game_highlights(game_id=123)
         assert "highlights" in result
+        assert result["highlights"] == [{"headline": "HR"}]
 
 
 def test_get_mlb_game_pace(mcp):
@@ -176,22 +184,39 @@ def test_get_mlb_game_pace(mcp):
     assert get_mlb_game_pace is not None
     with patch("mlb_api.mlb.get_gamepace", return_value={"pace": True}):
         result = get_mlb_game_pace(season=2022)
-        assert "pace" in result or isinstance(result, dict)
+        assert isinstance(result, dict)
+        assert result["game_pace"] == {"pace": True}
 
 
 def test_get_mlb_game_scoring_plays(mcp):
     get_mlb_game_scoring_plays = get_tool(mcp, "get_mlb_game_scoring_plays")
     assert get_mlb_game_scoring_plays is not None
-    # Corrected: Each play should be a MagicMock with .result.eventType
+    # The Plays model exposes plays as `all_plays` (snake_case) and each play's
+    # event type as `result.event_type` — the old `allplays`/`eventType` spellings
+    # were a pre-rename bug that silently matched nothing.
     mock_play1 = MagicMock()
-    mock_play1.result.eventType = "scoring_play"
+    mock_play1.result.event_type = "scoring_play"
     mock_play2 = MagicMock()
-    mock_play2.result.eventType = "other"
+    mock_play2.result.event_type = "other"
     mock_plays = MagicMock()
-    mock_plays.allplays = [mock_play1, mock_play2]
+    mock_plays.all_plays = [mock_play1, mock_play2]
     with patch("mlb_api.mlb.get_game_play_by_play", return_value=mock_plays):
         result = get_mlb_game_scoring_plays(game_id=1, eventType="scoring_play")
-        assert "plays" in result
+        assert result["plays"] == [mock_play1]
+
+
+def test_get_mlb_game_scoring_plays_no_filter(mcp):
+    """Without an eventType filter, all plays are returned."""
+    get_mlb_game_scoring_plays = get_tool(mcp, "get_mlb_game_scoring_plays")
+    mock_play1 = MagicMock()
+    mock_play1.result.event_type = "scoring_play"
+    mock_play2 = MagicMock()
+    mock_play2.result.event_type = "home_run"
+    mock_plays = MagicMock()
+    mock_plays.all_plays = [mock_play1, mock_play2]
+    with patch("mlb_api.mlb.get_game_play_by_play", return_value=mock_plays):
+        result = get_mlb_game_scoring_plays(game_id=1)
+        assert len(result["plays"]) == 2
 
 
 def test_get_mlb_linescore(mcp):
@@ -199,26 +224,30 @@ def test_get_mlb_linescore(mcp):
     assert get_mlb_linescore is not None
     with patch("mlb_api.mlb.get_game_line_score", return_value={"linescore": True}):
         result = get_mlb_linescore(game_id=1)
-        assert "linescore" in result or isinstance(result, dict)
+        assert isinstance(result, dict)
+        assert result["linescore"] == {"linescore": True}
 
 
 def test_get_mlb_roster(mcp):
     get_mlb_roster = get_tool(mcp, "get_mlb_roster")
     assert get_mlb_roster is not None
-    with patch("mlb_api.mlb.get_team_roster", return_value={"roster": True}):
+    # get_team_roster returns a bare list; the tool must wrap it under "roster"
+    # so the top-level structured result is a dict (MCP output schema, issue #7).
+    with patch("mlb_api.mlb.get_team_roster", return_value=[{"id": 1}]):
         # Test with team ID
         result = get_mlb_roster(team="1", date="2022-04-01")
-        assert "roster" in result or isinstance(result, dict)
-    with patch("mlb_api.mlb.get_team_roster", return_value={"roster": True}):
+        assert isinstance(result, dict)
+        assert result["roster"] == [{"id": 1}]
+    with patch("mlb_api.mlb.get_team_roster", return_value=[{"id": 1}]):
         # Test with team name (patch team ID lookup)
         with patch("mlb_api.get_team_id_from_name", return_value=1):
             result = get_mlb_roster(team="Yankees", date="2022-04-01")
-            assert "roster" in result or isinstance(result, dict)
-    with patch("mlb_api.mlb.get_team_roster", return_value={"roster": True}):
+            assert result["roster"] == [{"id": 1}]
+    with patch("mlb_api.mlb.get_team_roster", return_value=[{"id": 1}]):
         # Test with date and rosterType
         with patch("mlb_api.get_team_id_from_name", return_value=1):
             result = get_mlb_roster(team="Yankees", date="2022-04-01", rosterType="40Man")
-            assert "roster" in result or isinstance(result, dict)
+            assert result["roster"] == [{"id": 1}]
 
 
 def test_get_mlb_search_players(mcp):
@@ -498,7 +527,7 @@ def test_get_mlb_sabermetrics_error_handling(mcp):
 def test_get_mlb_game_highlights_error_handling(mcp):
     """Test error handling in get_mlb_game_highlights"""
     get_mlb_game_highlights = get_tool(mcp, "get_mlb_game_highlights")
-    with patch("mlb_api.mlb.get_game", side_effect=Exception("API Error")):
+    with patch("mlb_api.mlb._mlb_adapter_v1.get", side_effect=Exception("API Error")):
         result = get_mlb_game_highlights(game_id=123)
         assert "error" in result
 
