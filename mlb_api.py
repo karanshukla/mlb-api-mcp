@@ -452,7 +452,7 @@ def setup_mlb_tools(mcp):
               applied locally after fetching the full boxscore, so it never breaks response validation.
 
         Returns:
-            dict: Boxscore information.
+            dict: Boxscore information, under the ``boxscore`` key.
         """
         try:
             params = {}
@@ -468,8 +468,8 @@ def setup_mlb_tools(mcp):
             if fields is not None:
                 boxscore_dict = boxscore.model_dump(by_alias=True) if hasattr(boxscore, "model_dump") else boxscore
                 field_names = {f.strip() for f in fields.split(",") if f.strip()}
-                return filter_fields_by_name(boxscore_dict, field_names)
-            return boxscore
+                return {"boxscore": filter_fields_by_name(boxscore_dict, field_names)}
+            return {"boxscore": boxscore}
         except Exception as e:
             return {"error": str(e)}
 
@@ -551,11 +551,26 @@ def setup_mlb_tools(mcp):
             game_id (int): The game ID.
 
         Returns:
-            dict: Game highlights.
+            dict: Game highlights, under the ``highlights`` key.
         """
         try:
-            highlights = mlb.get_game(game_id).content.highlights
-            return highlights
+            # Fetch the raw game content directly rather than going through
+            # ``mlb.get_game(game_id).content.highlights``. The ``Game`` model
+            # validates the full game feed and breaks when upstream changes a
+            # field's shape (e.g. ``gameData.absChallenges`` was changed from a
+            # list to an object), which makes the whole highlights tool fail
+            # even though the highlights payload itself is intact. Reading the
+            # content endpoint directly sidesteps that validation entirely.
+            response = mlb._mlb_adapter_v1.get(endpoint=f"game/{game_id}/content")
+            if 400 <= response.status_code <= 499:
+                return {"error": f"No content found for game_id {game_id}"}
+            content = response.data or {}
+            highlights = content.get("highlights", {})
+            if isinstance(highlights, dict):
+                highlights = highlights.get("highlights", [])
+            if not highlights:
+                return {"error": f"No highlights found for game_id {game_id}"}
+            return {"highlights": highlights}
         except Exception as e:
             return {"error": str(e)}
 
@@ -569,11 +584,11 @@ def setup_mlb_tools(mcp):
             sport_id (int): Sport ID (default: 1 for MLB).
 
         Returns:
-            dict: Game pace statistics.
+            dict: Game pace statistics, under the ``game_pace`` key.
         """
         try:
             gamepace = mlb.get_gamepace(str(season), sport_id=sport_id)
-            return gamepace
+            return {"game_pace": gamepace}
         except Exception as e:
             return {"error": str(e)}
 
@@ -591,7 +606,7 @@ def setup_mlb_tools(mcp):
             fields (Optional[str]): Comma-separated list of fields to include.
 
         Returns:
-            dict: Game plays, optionally filtered by eventType.
+            dict: Game plays (under the ``plays`` key), optionally filtered by eventType.
         """
         try:
             params = {}
@@ -600,13 +615,19 @@ def setup_mlb_tools(mcp):
             if fields is not None:
                 params["fields"] = fields
             plays = mlb.get_game_play_by_play(game_id, **params)
+            # The Plays model exposes plays as ``all_plays`` (snake_case) and each
+            # play's event type as ``result.event_type``. The previous ``allplays`` /
+            # ``eventType`` spellings were pre-attribute-rename and silently matched
+            # nothing, so the eventType filter dropped every play.
+            all_plays = getattr(plays, "all_plays", []) or []
             if eventType:
                 filtered_plays = [
-                    play for play in plays.allplays if getattr(play.result, "eventType", None) == eventType
+                    play
+                    for play in all_plays
+                    if getattr(getattr(play, "result", None), "event_type", None) == eventType
                 ]
                 return {"plays": filtered_plays}
-            else:
-                return {"plays": plays.allplays}
+            return {"plays": all_plays}
         except Exception as e:
             return {"error": str(e)}
 
@@ -619,11 +640,11 @@ def setup_mlb_tools(mcp):
             game_id (int): The game ID.
 
         Returns:
-            dict: Linescore information.
+            dict: Linescore information, under the ``linescore`` key.
         """
         try:
             linescore = mlb.get_game_line_score(game_id)
-            return linescore
+            return {"linescore": linescore}
         except Exception as e:
             return {"error": str(e)}
 
@@ -667,7 +688,11 @@ def setup_mlb_tools(mcp):
             if team_id is None:
                 return {"error": f"Could not find team ID for '{team}'"}
             roster = mlb.get_team_roster(team_id, **params)
-            return roster
+            # ``get_team_roster`` returns a bare list of Player objects. Per the
+            # MCP spec a tool's structured result must be a dict (or None), so
+            # wrap the list under a descriptive key rather than returning it
+            # directly. See https://github.com/karanshukla/mlb-api-mcp/issues/7.
+            return {"roster": roster}
         except Exception as e:
             return {"error": str(e)}
 
