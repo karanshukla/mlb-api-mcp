@@ -261,10 +261,42 @@ def test_get_mlb_search_players(mcp):
         mock_get_people_id.assert_called_once_with("John Doe", sport_id=1, search_key="fullName")
 
 
+def test_mlb_dataadapter_requests_get_has_default_timeout():
+    """mlbstatsapi's requests.get() call has no timeout of its own; a stalled upstream
+    connection would otherwise hang the calling thread forever (observed in production as
+    tool calls hanging for exactly as long as the caller's own client-side timeout). We patch
+    a bounded default timeout in at import time - verify it's actually applied."""
+    import mlbstatsapi.mlb_dataadapter as da
+
+    with patch.object(mlb_api, "_original_mlb_dataadapter_requests_get") as mock_get:
+        da.requests.get("https://statsapi.mlb.com/api/v1/teams")
+        mock_get.assert_called_once_with(
+            "https://statsapi.mlb.com/api/v1/teams", timeout=mlb_api._MLB_STATSAPI_TIMEOUT_SECONDS
+        )
+
+
 def test_get_mlb_search_players_invalid_search_key(mcp):
     get_mlb_search_players = get_tool(mcp, "get_mlb_search_players")
     result = get_mlb_search_players(fullname="John Doe", search_key="all")
     assert "error" in result
+
+
+def test_get_mlb_search_players_strips_whitespace(mcp):
+    get_mlb_search_players = get_tool(mcp, "get_mlb_search_players")
+    with patch("mlb_api.mlb.get_people_id", return_value=[1]) as mock_get_people_id:
+        result = get_mlb_search_players(fullname="  Aaron Judge  ")
+        assert result["player_ids"] == [1]
+        # Leading/trailing whitespace must be stripped before the exact-match comparison,
+        # or an otherwise-correct name silently matches zero players.
+        mock_get_people_id.assert_called_once_with("Aaron Judge", sport_id=1, search_key="fullName")
+
+
+def test_get_mlb_search_players_no_match_includes_note(mcp):
+    get_mlb_search_players = get_tool(mcp, "get_mlb_search_players")
+    with patch("mlb_api.mlb.get_people_id", return_value=[]):
+        result = get_mlb_search_players(fullname="Judge")
+        assert result["player_ids"] == []
+        assert "note" in result
 
 
 def test_get_mlb_players(mcp):

@@ -2,7 +2,26 @@ from datetime import datetime
 from typing import Any, List, Optional
 
 import mlbstatsapi
+import mlbstatsapi.mlb_dataadapter
 from pybaseball import statcast, statcast_batter, statcast_pitcher
+
+# mlbstatsapi.mlb_dataadapter.MlbDataAdapter.get() calls requests.get() with no timeout, so a
+# stalled upstream connection (statsapi.mlb.com not responding, a hung proxy, etc.) blocks the
+# calling thread forever instead of failing. Under concurrent tool calls this exhausts the
+# server's worker pool and stalls unrelated requests too - observed in production as every
+# in-flight get_mlb_search_players/get_mlb_player_info call hanging for exactly 300s, which was
+# actually the *caller's* client-side timeout tearing down the connection, not ours. Patch in a
+# bounded timeout so a stalled upstream fails fast with a normal {"error": ...} response.
+_MLB_STATSAPI_TIMEOUT_SECONDS = 15
+_original_mlb_dataadapter_requests_get = mlbstatsapi.mlb_dataadapter.requests.get
+
+
+def _mlb_dataadapter_requests_get_with_timeout(*args, **kwargs):
+    kwargs.setdefault("timeout", _MLB_STATSAPI_TIMEOUT_SECONDS)
+    return _original_mlb_dataadapter_requests_get(*args, **kwargs)
+
+
+mlbstatsapi.mlb_dataadapter.requests.get = _mlb_dataadapter_requests_get_with_timeout
 
 mlb = mlbstatsapi.Mlb()
 
@@ -702,7 +721,8 @@ def setup_mlb_tools(mcp):
         Search for players by name.
 
         Args:
-            fullname (str): Player name to search for.
+            fullname (str): Player name to search for. Must be the player's exact full name
+              (case-insensitive); the underlying API does not support partial/substring matches.
             sport_id (int): Sport ID (default: 1 for MLB).
             search_key (str): Which field of each candidate player record to compare `fullname` against.
               The underlying API only ever fetches "fullName" for each player, so this must be "fullName"
@@ -717,8 +737,18 @@ def setup_mlb_tools(mcp):
             # common casings (e.g. "fullname") instead of silently matching zero players.
             if search_key.lower() != "fullname":
                 return {"error": f"Invalid search_key '{search_key}'. Must be 'fullName'."}
+            # The library does an exact (case-insensitive) string comparison with no trimming, so stray
+            # whitespace causes a silent zero-result match.
+            fullname = fullname.strip()
             player_ids = mlb.get_people_id(fullname, sport_id=sport_id, search_key="fullName")
-            return {"player_ids": player_ids}
+            result: dict = {"player_ids": player_ids}
+            if not player_ids:
+                result["note"] = (
+                    f"No player found with the exact full name '{fullname}'. This search requires an "
+                    "exact match (case-insensitive) against the player's full name; partial names "
+                    "(e.g. just a last name) will not match."
+                )
+            return result
         except Exception as e:
             return {"error": str(e)}
 
