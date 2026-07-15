@@ -1,0 +1,29 @@
+# Keep Python deps, the Docker base image, and GitHub Actions up to date.
+# Matches the convention used in other repos in this account (e.g. navyfragen-app).
+version: 2
+
+updates:
+  # Python dependencies declared in pyproject.toml
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(deps-dev)"
+
+  # Base image in the root Dockerfile
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # GitHub Actions used in .github/workflows/
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"

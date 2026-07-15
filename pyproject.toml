@@ -18,6 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "ruff>=0.0.292",
+    "mypy>=1.11",
     "pre-commit>=3.5.0",
 ]
 test = [
@@ -62,6 +63,10 @@ known-first-party = ["mlb_api_mcp"]
 "__init__.py" = ["F401"]
 "**/tests/**" = ["E501"]
 "main.py" = ["E501", "W293"]
+# railway-wrapper/server.py deliberately inserts the repo root onto sys.path
+# (and chdirs to it) before importing main/jwt/starlette, so the module-level
+# imports are not at the top of the file. See the inline comments there.
+"railway-wrapper/server.py" = ["E402"]
 
 # Suppress specific deprecation warnings
 [tool.pytest.ini_options]
@@ -111,3 +116,9 @@ precision = 2
 dev = [
     "pre-commit>=4.2.0",
 ]
+
+[tool.mypy]
+# Type-check the application modules. mlbstatsapi and pybaseball ship no type
+# stubs, so ignore their missing imports (matches asher-cli's pragmatic baseline).
+files = ["main.py", "generic_api.py", "mlb_api.py", "railway-wrapper/server.py"]
+ignore_missing_imports = true

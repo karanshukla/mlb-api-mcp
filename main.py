@@ -3,10 +3,9 @@ import os
 import warnings
 
 import uvicorn
-import fastmcp
 from fastmcp import FastMCP
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from generic_api import setup_generic_tools
 from mlb_api import setup_mlb_tools
@@ -32,9 +31,11 @@ async def get_tools_dict():
         return {tool.name: tool for tool in tools}
     return await mcp.get_tools()  # type: ignore[attr-defined]  # FastMCP 2.x -> dict[str, Tool]
 
+
 # Setup all MLB and generic tools
 setup_mlb_tools(mcp)
 setup_generic_tools(mcp)
+
 
 # Add custom routes to the MCP server for documentation and info
 @mcp.custom_route("/", methods=["GET"])
@@ -75,12 +76,12 @@ async def list_tools(request):
         tools.append(
             {
                 "name": tool_name,
-                "description": getattr(tool, "description", None)
-                or "No description available",
+                "description": getattr(tool, "description", None) or "No description available",
                 "parameters": getattr(tool, "parameters", None) or {},
             }
         )
     return JSONResponse({"tools": tools})
+
 
 # Add a basic docs endpoint that provides information about available endpoints
 @mcp.custom_route("/docs", methods=["GET"])
@@ -132,9 +133,7 @@ async def docs(request):
     """
     for tool_name, tool in tools_list.items():
         description = getattr(tool, "description", None) or "No description available"
-        docs_html += (
-            f'<div class="tool"><strong>{tool_name}</strong>: {description}</div>'
-        )
+        docs_html += f'<div class="tool"><strong>{tool_name}</strong>: {description}</div>'
     docs_html += """
         </div>
         
@@ -146,19 +145,17 @@ async def docs(request):
     """
     return HTMLResponse(content=docs_html)
 
+
 if __name__ == "__main__":
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="MLB API MCP Server")
+    parser.add_argument("--http", action="store_true", help="Run server with HTTP transport (default: stdio transport)")
     parser.add_argument(
-        "--http",
-        action="store_true",
-        help="Run server with HTTP transport (default: stdio transport)"
-    )
-    parser.add_argument(
-        "--port", "-p",
+        "--port",
+        "-p",
         type=int,
         default=8000,
-        help="Port to run the server on (default: 8000, env PORT takes priority)"
+        help="Port to run the server on (default: 8000, env PORT takes priority)",
     )
     args = parser.parse_args()
 
@@ -193,12 +190,7 @@ if __name__ == "__main__":
         app = mcp.http_app(middleware=[cors_middleware])
 
         # Run the MCP server with HTTP transport using uvicorn
-        uvicorn.run(
-            app,
-            host="0.0.0.0",
-            port=port,
-            log_level="info"
-        )
+        uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
     else:
         # Run with stdio transport (for Smithery)
         mcp.run(transport="stdio")
