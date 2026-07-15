@@ -261,6 +261,20 @@ def test_get_mlb_search_players(mcp):
         mock_get_people_id.assert_called_once_with("John Doe", sport_id=1, search_key="fullName")
 
 
+def test_mlb_dataadapter_requests_get_has_default_timeout():
+    """mlbstatsapi's requests.get() call has no timeout of its own; a stalled upstream
+    connection would otherwise hang the calling thread forever (observed in production as
+    tool calls hanging for exactly as long as the caller's own client-side timeout). We patch
+    a bounded default timeout in at import time - verify it's actually applied."""
+    import mlbstatsapi.mlb_dataadapter as da
+
+    with patch.object(mlb_api, "_original_mlb_dataadapter_requests_get") as mock_get:
+        da.requests.get("https://statsapi.mlb.com/api/v1/teams")
+        mock_get.assert_called_once_with(
+            "https://statsapi.mlb.com/api/v1/teams", timeout=mlb_api._MLB_STATSAPI_TIMEOUT_SECONDS
+        )
+
+
 def test_get_mlb_search_players_invalid_search_key(mcp):
     get_mlb_search_players = get_tool(mcp, "get_mlb_search_players")
     result = get_mlb_search_players(fullname="John Doe", search_key="all")
